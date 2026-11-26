@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simple grapher</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; font-family: sans-serif; background: #fff; color: #111; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+  #panel { position: fixed; top: 8px; left: 8px; width: min(480px, calc(100% - 34px)); max-height: 70%; overflow: auto;
+           background: #fffffff2; border: 1px solid #ccc; border-radius: 8px; padding: 8px; }
+  .row { display: flex; align-items: center; gap: 5px; margin-bottom: 6px; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; }
+  input { font-size: 16px; padding: 4px; min-width: 0; }
+  .f { flex: 3; width: 0; }
+  .note { flex: 2; width: 0; }
+  .dom { margin-left: 17px; font-size: 13px; }
+  .dom input { width: 70px; }
+  .err { color: #b91c1c; font-size: 13px; margin: -2px 0 6px 17px; }
+  button { font-size: 14px; padding: 4px 8px; cursor: pointer; }
+  #toggle { position: fixed; bottom: 8px; left: 8px; }
+  #home { position: fixed; bottom: 8px; right: 8px; }
+</style>
+</head>
+<body>
+<canvas id="g" role="img"></canvas>
+<div id="panel">
+  <div id="rows"></div>
+  <button id="add">+ Add function</button>
+</div>
+<button id="toggle">Hide / show</button>
+<button id="home">Reset view</button>
+<script>
+// Turns text into a function of x. No eval, so a shared link cannot run code.
+function compile(src) {
+  const FN = { abs: Math.abs, sqrt: Math.sqrt, sin: Math.sin, cos: Math.cos, tan: Math.tan,
+               ln: Math.log, log: Math.log10, exp: Math.exp };
+  const s = src.toLowerCase().replace(/\s+/g, "").replace(/^y=/, "");
+  if (s.length > 200) throw Error("Function is too long");
+  const t = s.match(/\d+\.?\d*|\.\d+|abs|sqrt|sin|cos|tan|ln|log|exp|pi|./g) || [];
+  let i = 0, bars = 0;
+  const eat = c => { if (t[i] !== c) throw Error("Expected " + c); i++; };
+  function sum() {
+    let a = product();
+    while (t[i] === "+" || t[i] === "-") {
+      const op = t[i++], l = a, r = product();
+      a = op === "+" ? x => l(x) + r(x) : x => l(x) - r(x);
+    }
+    return a;
+  }
+  function product() {
+    let a = unary();
+    for (;;) {
+      const k = t[i], l = a;
+      if (k === "*" || k === "/") {
+        i++; const r = unary();
+        a = k === "*" ? x => l(x) * r(x) : x => l(x) / r(x);
+      } else if (k !== undefined && (/^([\d.a-z(])/.test(k) || (k === "|" && bars === 0))) {
+        const r = power();                       // implied multiply: 2x, 3(x+1)
+        a = x => l(x) * r(x);
+      } else return a;
+    }
+  }
+  function unary() {
+    if (t[i] === "-") { i++; const a = unary(); return x => -a(x); }
+    if (t[i] === "+") { i++; return unary(); }
+    return power();
+  }
+  function power() {
+    const a = atom();
+    if (t[i] !== "^") return a;
+    i++; const b = unary();
+    return x => Math.pow(a(x), b(x));
+  }
+  function atom() {
+    const k = t[i++];
+    if (k === undefined) throw Error("Function is incomplete");
+    if (/^\.?\d/.test(k)) { const n = Number(k); return () => n; }
+    if (k === "x") return x => x;
+    if (k === "pi") return () => Math.PI;
+    if (k === "e") return () => Math.E;
+    if (k === "(") { const a = sum(); eat(")"); return a; }
+    if (k === "|") { bars++; const a = sum(); eat("|"); bars--; return x => Math.abs(a(x)); }
+    if (Object.hasOwn(FN, k)) { eat("("); const a = sum(); eat(")"); return x => FN[k](a(x)); }
+    throw Error("Unknown symbol: " + k);
+  }
+  const f = sum();
+  if (i < t.length) throw Error("Unexpected " + t[i]);
+  return f;
+}
+
+// "x^2 {-2,3}" gives a function with its own domain. Either side may be left empty.
+function parseEntry(text, fallback) {
+  let src = text.trim(), dom = fallback;
+  const m = src.match(/\{([^{}]*)\}$/);
+  if (m) { dom = parseDomain(m[1]); src = src.slice(0, m.index); }
+  return { f: compile(src), lo: dom[0], hi: dom[1] };
+}
+function parseDomain(text) {
+  const p = text.split(",");
+  if (p.length !== 2) throw Error("Domain must look like {-2,3}");
+  const d = p.map((v, i) => {
+    const t = v.trim().toLowerCase();
+    if (t === "") return i ? Infinity : -Infinity;
+    const inf = t.match(/^([+-]?)\s*(inf|infinity|infinite|\u221e)$/);
+    if (inf) return inf[1] === "-" ? -Infinity : Infinity;
+    const n = compile(t)(NaN);
+    if (Number.isNaN(n)) throw Error("Domain limits must be numbers or inf");
+    return n;
+  });
+  if (!(d[0] < d[1])) throw Error("Domain start must be less than its end");
+  return d;
+}
+
+// Read parameters by hand so that "+" stays a plus sign. f may repeat or be split by ";"
+function params() {
+  const out = { f: [], n: [] };
+  for (const part of location.search.slice(1).split("&")) {
+    const [k, ...v] = part.split("=");
+    let val = v.join("=");
+    try { val = decodeURIComponent(val); } catch {}
+    if (k === "f") out.f.push(...val.split(";").filter(s => s.trim()));
+    else if (k === "n") out.n.push(val);
+    else out[k] = val;
+  }
+  return out;
+}
+
+const COLORS = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2"];
+const $ = id => document.getElementById(id);
+const c = $("g"), ctx = c.getContext("2d");
+let funcs, notes, globalD, domainError, view, home, W, H;
+
+const scale = () => Math.min(W, H) / (2 * view.r);       // pixels per unit, same on both axes
+const X = x => W / 2 + (x - view.x) * scale();
+const Y = y => H / 2 - (y - view.y) * scale();
+
+function line(x1, y1, x2, y2, color) {
+  ctx.strokeStyle = color; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+}
+
+function draw() {
+  W = innerWidth; H = innerHeight;
+  const dpr = devicePixelRatio || 1;
+  c.width = W * dpr; c.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const s = scale(), left = view.x - W / 2 / s, right = view.x + W / 2 / s;
+  const bottom = view.y - H / 2 / s, top = view.y + H / 2 / s;
+
+  const raw = 60 / s, p = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 5, 10].map(m => m * p).find(v => v >= raw);
+  const ax = Math.min(Math.max(X(0), 0), W - 36), ay = Math.min(Math.max(Y(0), 0), H - 16);
+  const label = v => String(+v.toPrecision(10));
+  ctx.lineWidth = 1; ctx.font = "12px sans-serif"; ctx.fillStyle = "#555";
+  for (let j = Math.ceil(left / step); j <= right / step; j++) {
+    line(X(j * step), 0, X(j * step), H, "#e5e5e5");
+    if (j) ctx.fillText(label(j * step), X(j * step) - 6, ay + 13);
+  }
+  for (let j = Math.ceil(bottom / step); j <= top / step; j++) {
+    line(0, Y(j * step), W, Y(j * step), "#e5e5e5");
+    if (j) ctx.fillText(label(j * step), ax + 4, Y(j * step) + 4);
+  }
+  line(0, Y(0), W, Y(0), "#000"); line(X(0), 0, X(0), H, "#000");
+
+  funcs.forEach((text, n) => {
+    const err = $("rows").querySelectorAll(".err")[n];
+    if (err) err.textContent = "";
+    if (!text.trim()) return;
+    let e;
+    try {
+      if (domainError) throw Error(domainError);
+      e = parseEntry(text, globalD);
+    } catch (x) { if (err) err.textContent = x.message; return; }
+    const color = COLORS[n % COLORS.length];
+    const a = Math.max(left, e.lo), b = Math.min(right, e.hi);
+    if (a > b) return;
+    ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.beginPath();
+    const count = Math.max(1, Math.ceil((b - a) * s * 2));
+    let pen = false, last = 0;
+    for (let i = 0; i <= count; i++) {
+      const x = i === count ? b : a + (b - a) * i / count, py = Y(e.f(x));
+      // Lift the pen at gaps and at jumps such as the one in 1/x
+      if (!Number.isFinite(py)) { pen = false; continue; }
+      if (pen && Math.abs(py - last) > H) pen = false;
+      pen ? ctx.lineTo(X(x), py) : ctx.moveTo(X(x), py);
+      pen = true; last = py;
+    }
+    ctx.stroke();
+    for (const x of [e.lo, e.hi]) {                      // dots mark the ends of a domain
+      const y = e.f(x);
+      if (Number.isFinite(x) && Number.isFinite(y)) {
+        ctx.fillStyle = color; ctx.beginPath(); ctx.arc(X(x), Y(y), 4.5, 0, 7); ctx.fill();
+      }
+    }
+  });
+  c.setAttribute("aria-label", "Graph of " + funcs.map(f => "y = " + f).join(", "));
+}
+
+// Keep the address bar in step with what is on screen, so it can be copied
+let timer;
+function save() {
+  clearTimeout(timer);
+  timer = setTimeout(() => {
+    const used = funcs.map((f, i) => i).filter(i => funcs[i].trim());
+    const q = used.map(i => "f=" + encodeURIComponent(funcs[i]));
+    if (used.some(i => notes[i])) q.push(...used.map(i => "n=" + encodeURIComponent(notes[i] || "")));
+    const p = params();
+    if (p.d) q.push("d=" + encodeURIComponent(p.d));
+    for (const k of ["r", "x", "y"]) q.push(k + "=" + +view[k].toPrecision(6));
+    if (p.ui === "0") q.push("ui=0");
+    history.replaceState(null, "", "?" + q.join("&"));
+  }, 250);
+}
+
+function rows() {
+  $("rows").replaceChildren();
+  funcs.forEach((text, n) => {
+    const row = document.createElement("div"), dom = document.createElement("div"), err = document.createElement("div");
+    row.className = "row"; dom.className = "row dom"; err.className = "err";
+    row.innerHTML = '<span class="dot"></span>y =<input class="f" autocomplete="off" spellcheck="false" aria-label="Function"><input class="note" placeholder="Note" autocomplete="off" aria-label="Note"><button title="Remove" aria-label="Remove">&times;</button>';
+    dom.innerHTML = 'x from<input class="lo" placeholder="-inf" aria-label="Domain start">to<input class="hi" placeholder="inf" aria-label="Domain end">';
+    row.querySelector(".dot").style.background = COLORS[n % COLORS.length];
+    const input = row.querySelector("input"), lo = dom.querySelector(".lo"), hi = dom.querySelector(".hi");
+    const m = text.match(/^(.*?)\s*\{([^{},]*),([^{},]*)\}\s*$/);
+    input.value = m ? m[1] : text; input.placeholder = "|x|-5";
+    if (m) { lo.value = m[2]; hi.value = m[3]; }
+    input.oninput = lo.oninput = hi.oninput = () => {
+      const limited = lo.value.trim() || hi.value.trim();
+      funcs[n] = input.value + (limited && input.value.trim() ? "{" + lo.value + "," + hi.value + "}" : "");
+      draw(); save();
+    };
+    const note = row.querySelector(".note");
+    note.value = notes[n] || "";
+    note.oninput = () => { notes[n] = note.value; save(); };
+    row.querySelector("button").onclick = () => { funcs.splice(n, 1); notes.splice(n, 1); rows(); draw(); save(); };
+    $("rows").append(row, dom, err);
+  });
+}
+
+function zoom(factor, px, py) {
+  const s = scale(), mx = view.x + (px - W / 2) / s, my = view.y - (py - H / 2) / s;
+  const r = Math.min(Math.max(view.r * factor, 1e-3), 1e6), k = r / view.r;
+  view = { r, x: mx + (view.x - mx) * k, y: my + (view.y - my) * k };
+  draw(); save();
+}
+
+const pointers = new Map();
+c.onpointerdown = e => { c.setPointerCapture(e.pointerId); pointers.set(e.pointerId, e); };
+c.onpointerup = c.onpointercancel = e => pointers.delete(e.pointerId);
+c.onpointermove = e => {
+  const old = pointers.get(e.pointerId);
+  if (!old) return;
+  const other = [...pointers.values()].find(p => p.pointerId !== e.pointerId);
+  pointers.set(e.pointerId, e);
+  if (other) {                                           // pinch with two fingers
+    const before = Math.hypot(old.clientX - other.clientX, old.clientY - other.clientY);
+    const after = Math.hypot(e.clientX - other.clientX, e.clientY - other.clientY);
+    if (before && after) zoom(before / after, (e.clientX + other.clientX) / 2, (e.clientY + other.clientY) / 2);
+  } else {
+    view.x -= (e.clientX - old.clientX) / scale();
+    view.y += (e.clientY - old.clientY) / scale();
+    draw(); save();
+  }
+};
+c.addEventListener("wheel", e => {
+  e.preventDefault();
+  zoom(Math.exp(Math.max(-100, Math.min(100, e.deltaY)) * 0.002), e.clientX, e.clientY);
+}, { passive: false });
+
+$("add").onclick = () => { funcs.push(""); notes.push(""); rows(); draw(); $("rows").querySelectorAll("input")[funcs.length - 1].focus(); };
+$("toggle").onclick = () => $("panel").hidden = !$("panel").hidden;
+$("home").onclick = () => { view = { ...home }; draw(); save(); };
+addEventListener("resize", draw);
+
+const q = params();
+funcs = q.f.length ? q.f : ["|x|-5"];
+notes = funcs.map((f, i) => q.n[i] || "");
+globalD = [-Infinity, Infinity];
+try { if (q.d) globalD = parseDomain(q.d); } catch (e) { domainError = e.message; }
+const num = (v, d) => v !== undefined && Number.isFinite(Number(v)) ? Number(v) : d;
+view = { r: num(q.r, 10) > 0 ? num(q.r, 10) : 10, x: num(q.x, 0), y: num(q.y, 0) };
+home = { r: view.r, x: 0, y: 0 };
+if (q.ui === "0") $("panel").hidden = true;
+rows(); draw();
+</script>
+</body>
+</html>
