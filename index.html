@@ -18,17 +18,20 @@
   .dom input { width: 70px; }
   .err { color: #b91c1c; font-size: 13px; margin: -2px 0 6px 17px; }
   button { font-size: 14px; padding: 4px 8px; cursor: pointer; }
-  #toggle { position: fixed; bottom: 8px; left: 8px; }
+  #open { position: fixed; top: 8px; left: 8px; }
+  [hidden] { display: none !important; }
+  #hide { margin-left: auto; }
   #home { position: fixed; bottom: 8px; right: 8px; }
 </style>
 </head>
 <body>
 <canvas id="g" role="img"></canvas>
 <div id="panel">
+  <div class="row"><button id="hide">&laquo; Hide</button></div>
   <div id="rows"></div>
   <button id="add">+ Add function</button>
 </div>
-<button id="toggle">Hide / show</button>
+<button id="open" hidden>&raquo; Functions</button>
 <button id="home">Reset view</button>
 <script>
 // Turns text into a function of x. No eval, so a shared link cannot run code.
@@ -207,7 +210,7 @@ function save() {
     const p = params();
     if (p.d) q.push("d=" + encodeURIComponent(p.d));
     for (const k of ["r", "x", "y"]) q.push(k + "=" + +view[k].toPrecision(6));
-    if (p.ui === "0") q.push("ui=0");
+    if ($("panel").hidden) q.push("ui=0");
     history.replaceState(null, "", "?" + q.join("&"));
   }, 250);
 }
@@ -268,7 +271,9 @@ c.addEventListener("wheel", e => {
 }, { passive: false });
 
 $("add").onclick = () => { funcs.push(""); notes.push(""); rows(); draw(); $("rows").querySelectorAll("input")[funcs.length - 1].focus(); };
-$("toggle").onclick = () => $("panel").hidden = !$("panel").hidden;
+function showPanel(on) { $("panel").hidden = !on; $("open").hidden = on; }
+$("hide").onclick = () => { showPanel(false); save(); };
+$("open").onclick = () => { showPanel(true); save(); };
 $("home").onclick = () => { view = { ...home }; draw(); save(); };
 addEventListener("resize", draw);
 
@@ -280,7 +285,7 @@ try { if (q.d) globalD = parseDomain(q.d); } catch (e) { domainError = e.message
 const num = (v, d) => v !== undefined && Number.isFinite(Number(v)) ? Number(v) : d;
 view = { r: num(q.r, 10) > 0 ? num(q.r, 10) : 10, x: num(q.x, 0), y: num(q.y, 0) };
 home = { r: view.r, x: 0, y: 0 };
-if (q.ui === "0") $("panel").hidden = true;
+showPanel(q.ui !== "0");
 rows(); draw();
 </script>
 </body>
